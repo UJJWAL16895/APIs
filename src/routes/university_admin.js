@@ -126,29 +126,17 @@ router.get('/admin/my-batches', authenticateAdmin, async (req, res) => {
     }
 });
 
-// --- GET TEACHERS (Protected) ---
-router.get('/admin/teachers/:universityId', authenticateAdmin, async (req, res) => {
+// --- GET MY TEACHERS (Auto-detected from Cookie) ---
+router.get('/admin/my-teachers', authenticateAdmin, async (req, res) => {
     try {
-        const { universityId } = req.params;
+        // 1. Get the ID directly from the secure session (JWT)
+        const myUniversityId = req.user.universityId;
 
-        // SECURITY CHECK:
-        // Ensure the logged-in Admin is not trying to peek at another university's teachers
-        if (req.user.universityId !== universityId) {
-            return res.status(403).json({ error: "UNAUTHORIZED_ACCESS" });
-        }
-
-        // Fetch teachers from the database
+        // 2. Fetch teachers for THIS university only
         const { data, error } = await supabase
             .from('teachers_details')
-            .select('teacher_id, student_name, uni_reg_id, email, assigned_section') // Mapped columns based on previous schema knowledge (student_name used as teacher name)
-            // Note: Schema might need adjustment if column names differ from previous 'admin.js' inference.
-            // Reverting to provided code's column names effectively, but assuming 'student_name' is teacher_name based on previous files.
-            // Wait, provided code says: 'teacher_id, teacher_name, uni_reg_id, teacher_email, assigned_section'
-            // The user provided specific code. I should probably trust it, BUT I recall 'teachers_details' having 'student_name' in `admin.js` previously.
-            // Let's stick to the USER PROVIDED code. If it fails, they will see it. 
-            // Better yet, I'll use the user's code exact block.
             .select('teacher_id, teacher_name, uni_reg_id, teacher_email, assigned_section')
-            .eq('university_id', universityId)
+            .eq('university_id', myUniversityId)
             .order('teacher_name', { ascending: true });
 
         if (error) throw error;
