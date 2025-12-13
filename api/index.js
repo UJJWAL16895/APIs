@@ -12,13 +12,15 @@ app.use(express.json());
 // Import Routes
 const teacherRouter = require('../src/routes/teacher');
 const studentDashboardRouter = require('../src/routes/student_dashboard');
+const adminRouter = require('../src/routes/admin');
 
 // Mount Routes
 // All teacher auth routes will be prefixed with /api/auth/teacher
 app.use('/api/auth/teacher', teacherRouter);
 // Student Dashboard routes mounted at /api
-// e.g., /api/masters/batches, /api/analytics/summary
 app.use('/api', studentDashboardRouter);
+// Admin routes mounted at /api/admin
+app.use('/api/admin', adminRouter);
 
 // Root endpoint for testing
 app.get('/', (req, res) => {
