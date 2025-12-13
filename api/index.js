@@ -12,7 +12,6 @@ app.use(express.json());
 // Import Routes
 const teacherRouter = require('../src/routes/teacher');
 const studentDashboardRouter = require('../src/routes/student_dashboard');
-const adminRouter = require('../src/routes/admin');
 const universityRouter = require('../src/routes/university_admin');
 
 // Mount Routes
@@ -20,8 +19,6 @@ const universityRouter = require('../src/routes/university_admin');
 app.use('/api/auth/teacher', teacherRouter);
 // Student Dashboard routes mounted at /api
 app.use('/api', studentDashboardRouter);
-// Admin routes mounted at /api/admin
-app.use('/api/admin', adminRouter);
 // University routes mounted at /api/university
 app.use('/api/university', universityRouter);
 
