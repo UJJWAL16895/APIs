@@ -149,4 +149,52 @@ router.get('/admin/my-teachers', authenticateAdmin, async (req, res) => {
     }
 });
 
+// --- GET STUDENTS BY SECTION (With Hardcoded Progress) ---
+router.get('/admin/students/:section', authenticateAdmin, async (req, res) => {
+    try {
+        const { section } = req.params;
+        const myUniversityId = req.user.universityId; // From Admin Token
+
+        // 1. Fetch Students
+        // We use "!inner" to enforce that the batch MUST belong to the Admin's University
+        const { data: students, error } = await supabase
+            .from('students')
+            .select(`
+                student_id, 
+                student_name, 
+                uni_reg_id, 
+                section, 
+                student_email,
+                student_phone,
+                batches!inner(university_id) 
+            `)
+            .eq('section', section)
+            .eq('batches.university_id', myUniversityId) // <--- SECURITY LOCK
+            .order('student_name', { ascending: true });
+
+        if (error) throw error;
+
+        // 2. Add Hardcoded Progress (As requested)
+        const studentsWithProgress = (students || []).map(student => ({
+            ...student,
+            // Removes the nested 'batches' object from the final response to keep it clean
+            batches: undefined,
+
+            // Hardcoded Progress Logic
+            progress: {
+                completed_lectures: 12,
+                total_lectures: 20,
+                course_completion_percentage: 60,
+                last_active: "2023-12-14"
+            }
+        }));
+
+        res.json({ success: true, data: studentsWithProgress });
+
+    } catch (e) {
+        console.error("Fetch Students Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR" });
+    }
+});
+
 module.exports = router;
