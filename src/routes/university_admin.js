@@ -19,8 +19,10 @@ router.use(cookieParser());
 const authenticateAdmin = (req, res, next) => {
     const token = req.cookies.admin_token; // Read from HttpOnly Cookie
 
+    console.log(`[AuthMiddleware] Path: ${req.path}, Cookie Present: ${!!token}`);
+
     if (!token) {
-        return res.status(401).json({ error: "UNAUTHORIZED" });
+        return res.status(401).json({ error: "UNAUTHORIZED", path: req.path });
     }
 
     try {
@@ -28,6 +30,7 @@ const authenticateAdmin = (req, res, next) => {
         req.user = decoded; // Attach user to request
         next();
     } catch (err) {
+        console.error("Token Verification Failed:", err.message);
         return res.status(401).json({ error: "INVALID_TOKEN" });
     }
 };

@@ -4,10 +4,12 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+const cookieParser = require('cookie-parser');
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(cookieParser());
 
 // Import Routes
 const teacherRouter = require('../src/routes/teacher');
