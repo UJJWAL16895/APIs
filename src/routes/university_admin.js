@@ -71,9 +71,9 @@ router.post('/auth/login', async (req, res) => {
 
         // D. Set HttpOnly Cookie
         res.cookie('admin_token', token, {
-            httpOnly: true,       // Prevents JS access (XSS protection)
-            secure: true,      // HTTPS only (Required for Vercel/Production)
-            sameSite: 'None',     // Required for cross-site cookie (Vercel -> Frontend)
+            httpOnly: true,
+            secure: IS_PROD,           // True in Prod (HTTPS), False in Dev (HTTP)
+            sameSite: IS_PROD ? 'None' : 'Lax', // None for Cross-Site (Prod), Lax for Local
             maxAge: 2 * 60 * 60 * 1000 // 2 Hours
         });
 
