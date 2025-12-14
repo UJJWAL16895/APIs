@@ -332,64 +332,124 @@ router.get('/admin/course-structure/:courseId', authenticateAdmin, async (req, r
 
 // --- GET FULL SECTION ANALYTICS (Matrix View) ---
 // --- GET SECTION ANALYTICS (Real Students + Real Courses) ---
+// --- GET SECTION ANALYTICS MATRIX (Real Data Integration) ---
 router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (req, res) => {
     try {
         const { sectionName } = req.params;
         const myUniversityId = req.user.universityId;
 
-        // 1. Fetch REAL Students from 'students' table
+        // ---------------------------------------------------------
+        // 1. FETCH STUDENTS & THEIR BATCH INFO
+        // ---------------------------------------------------------
+        // We join 'batches' to get the 'registered_courses_id' array automatically.
         const { data: students, error: studentError } = await supabase
             .from('students')
-            .select('student_id, student_name, uni_reg_id')
+            .select(`
+                student_id, 
+                student_name, 
+                uni_reg_id, 
+                batch_id,
+                batches ( registered_courses_id ) 
+            `)
             .eq('section', sectionName)
-            .eq('uni_id', myUniversityId) // Fixed: using uni_id as per your schema
+            .eq('uni_id', myUniversityId)
             .order('student_name', { ascending: true });
 
         if (studentError) throw studentError;
 
-        // 2. Fetch REAL Courses from 'courses' table
-        // We get all active courses for this university
-        const { data: courses, error: courseError } = await supabase
-            .from('courses')
-            .select('course_id, course_name')
-            .eq('university_id', myUniversityId);
-
-        if (courseError) throw courseError;
-
-        // Handle case where no courses exist yet
-        if (!courses || courses.length === 0) {
-            return res.status(404).json({ error: "No courses found for this university." });
+        if (!students || students.length === 0) {
+            return res.json({ success: true, data: { section_metadata: { total_students: 0 }, student_performance: [] } });
         }
 
-        // 3. Generate Progress Matrix (Real Data + Simulated Scores)
-        // Since we don't have an 'exam_results' table yet, we generate random progress 
-        // for each *real* student in each *real* course.
+        // ---------------------------------------------------------
+        // 2. IDENTIFY COURSES FOR THIS SECTION
+        // ---------------------------------------------------------
+        // Logic: We look at the first student's batch to decide which courses to show.
+        // If batch info is missing, we fallback to fetching ALL courses for the university.
+        let targetCourseIds = [];
 
-        let courseTotals = {}; // To store sum of scores per course
-        courses.forEach(c => courseTotals[c.course_id] = 0);
+        const firstBatch = students[0].batches;
+        if (firstBatch && firstBatch.registered_courses_id && firstBatch.registered_courses_id.length > 0) {
+            targetCourseIds = firstBatch.registered_courses_id;
+        }
 
-        const studentCount = students.length || 1;
+        let courses = [];
 
-        const studentData = students.map(student => {
-            let totalStudentScore = 0;
-            let courseCount = 0;
+        if (targetCourseIds.length > 0) {
+            // Fetch only specific courses assigned to this batch
+            const { data: fetchedCourses } = await supabase
+                .from('courses')
+                .select('course_id, course_name')
+                .in('course_id', targetCourseIds);
+            courses = fetchedCourses || [];
+        } else {
+            // FALLBACK: Fetch ALL active courses for this university if no batch data exists
+            const { data: allCourses } = await supabase
+                .from('courses')
+                .select('course_id, course_name')
+                .eq('university_id', myUniversityId);
+            courses = allCourses || [];
+        }
 
-            // Map over the REAL courses we fetched
+        // ---------------------------------------------------------
+        // 3. FETCH EXAM RESULTS (THE SCORES)
+        // ---------------------------------------------------------
+        // We fetch ALL results for these students in one go (Efficient)
+        const studentIds = students.map(s => s.student_id);
+        const { data: allResults, error: resultError } = await supabase
+            .from('results')
+            .select('student_id, course_id, marks_obtained, total_marks')
+            .in('student_id', studentIds);
+
+        if (resultError) throw resultError;
+
+        // ---------------------------------------------------------
+        // 4. CALCULATE AGGREGATES & BUILD RESPONSE
+        // ---------------------------------------------------------
+
+        // Helper to store totals for the "Class Average" row
+        let courseGrandTotals = {};
+        courses.forEach(c => courseGrandTotals[c.course_id] = { sum: 0, count: 0 });
+
+        const studentPerformance = students.map(student => {
+            let studentTotalPercent = 0;
+            let coursesTakenCount = 0;
+
             const studentCourses = courses.map(course => {
-                // SIMULATION: This is where you'd query the real 'exam_results' table later.
-                // For now, we generate a realistic score (e.g., between 45% and 98%)
-                const simulatedScore = Math.floor(Math.random() * (98 - 45 + 1)) + 45;
+                // Filter results for this specific student AND course
+                // (A student might have multiple results for 1 course, e.g., Unit 1 Test, Unit 2 Test)
+                const relevantResults = allResults.filter(r =>
+                    r.student_id === student.student_id &&
+                    r.course_id === course.course_id
+                );
 
-                // Add to totals
-                courseTotals[course.course_id] += simulatedScore;
-                totalStudentScore += simulatedScore;
-                courseCount++;
+                let scorePercent = 0;
+                let status = "N/A";
+
+                if (relevantResults.length > 0) {
+                    // Calculate Aggregate Percentage: (Sum Obtained / Sum Total) * 100
+                    const totalObtained = relevantResults.reduce((sum, r) => sum + (Number(r.marks_obtained) || 0), 0);
+                    const totalMax = relevantResults.reduce((sum, r) => sum + (Number(r.total_marks) || 0), 0);
+
+                    if (totalMax > 0) {
+                        scorePercent = Math.round((totalObtained / totalMax) * 100);
+                        status = scorePercent >= 40 ? "Pass" : "Fail";
+
+                        // Add to Grand Totals (for Class Average)
+                        courseGrandTotals[course.course_id].sum += scorePercent;
+                        courseGrandTotals[course.course_id].count += 1;
+
+                        // Add to Student Totals (for Overall Progress)
+                        studentTotalPercent += scorePercent;
+                        coursesTakenCount++;
+                    }
+                }
 
                 return {
                     course_id: course.course_id,
                     course_name: course.course_name,
-                    score: simulatedScore,
-                    status: simulatedScore > 40 ? "Pass" : "Fail"
+                    score: scorePercent,
+                    status: status
                 };
             });
 
@@ -397,20 +457,21 @@ router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (re
                 student_id: student.student_id,
                 student_name: student.student_name,
                 uni_reg_id: student.uni_reg_id,
-                // Calculate average across all real courses
-                overall_progress: Math.round(totalStudentScore / (courseCount || 1)),
+                overall_progress: coursesTakenCount > 0 ? Math.round(studentTotalPercent / coursesTakenCount) : 0,
                 courses: studentCourses
             };
         });
 
-        // 4. Calculate Overall Course Averages
-        const coursePerformance = courses.map(course => ({
-            course_id: course.course_id,
-            course_name: course.course_name,
-            average_score: Math.round(courseTotals[course.course_id] / studentCount)
-        }));
+        // Calculate Final Class Averages (Bottom Row)
+        const courseAverages = courses.map(c => {
+            const totals = courseGrandTotals[c.course_id];
+            return {
+                course_id: c.course_id,
+                course_name: c.course_name,
+                average_score: totals.count > 0 ? Math.round(totals.sum / totals.count) : 0
+            };
+        });
 
-        // 5. Send Response
         res.json({
             success: true,
             data: {
@@ -419,10 +480,8 @@ router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (re
                     total_students: students.length,
                     total_courses: courses.length
                 },
-                // The "Bottom Row" of your matrix (Average per course)
-                course_performance: coursePerformance,
-                // The "Rows" of your matrix (Student details)
-                student_performance: studentData
+                course_performance: courseAverages,
+                student_performance: studentPerformance
             }
         });
 
