@@ -224,60 +224,12 @@ router.get('/university/admin/course-structure/:courseId', authenticateAdmin, as
 
 // --- GET STUDENTS BY SECTION (With Hardcoded Progress) ---
 // --- GET STUDENTS BY SECTION (With Hardcoded Progress) ---
-router.get('/admin/students/:section', authenticateAdmin, async (req, res) => {
-    try {
-        const { section } = req.params;
-        const myUniversityId = req.user.universityId; // From Admin Token
-
-        // 1. Fetch Students
-        // We use "!inner" to enforce that the batch MUST belong to the Admin's University
-        const { data: students, error } = await supabase
-            .from('students')
-            .select(`
-                student_id, 
-                student_name, 
-                uni_reg_id, 
-                section, 
-                student_email,
-                student_phone,
-                batches!inner(university_id) 
-            `)
-            .eq('section', section)
-            .eq('batches.university_id', myUniversityId) // <--- SECURITY LOCK
-            .order('student_name', { ascending: true });
-
-        if (error) throw error;
-
-        // 2. Add Hardcoded Progress (As requested)
-        const studentsWithProgress = (students || []).map(student => ({
-            ...student,
-            // Removes the nested 'batches' object from the final response to keep it clean
-            batches: undefined,
-
-            // Hardcoded Progress Logic
-            progress: {
-                completed_lectures: 12,
-                total_lectures: 20,
-                course_completion_percentage: 60,
-                last_active: "2023-12-14"
-            }
-        }));
-
-        res.json({ success: true, data: studentsWithProgress });
-
-    } catch (e) {
-        console.error("Fetch Students Error:", e);
-        res.status(500).json({ error: "SERVER_ERROR" });
-    }
-});
-
-// --- GET COURSE STRUCTURE WITH ANALYTICS (Firebase + Hardcoded Stats) ---
+// --- GET COURSE STRUCTURE WITH ANALYTICS ---
 router.get('/admin/course-structure/:courseId', authenticateAdmin, async (req, res) => {
     try {
         const { courseId } = req.params;
 
-        // 1. Fetch Course Units from Firebase
-        // Path: EduCode/Courses/{courseId}/units
+        // 1. Fetch from Firebase
         const unitsRef = ref(database, `EduCode/Courses/${courseId}/units`);
         const snapshot = await get(unitsRef);
 
@@ -287,37 +239,33 @@ router.get('/admin/course-structure/:courseId', authenticateAdmin, async (req, r
 
         const unitsData = snapshot.val();
 
-        // 2. Transform Data & Add Hardcoded Analytics
-        // We convert the Firebase Object (Key-Value) into an Array
+        // 2. Transform Data
         const unitsArray = Object.entries(unitsData).map(([unitId, unitVal]) => {
 
-            // Extract Sub-Units (if any)
             const subUnitsObj = unitVal['sub-units'] || {};
+
+            // --- FIX IS HERE ---
             const subUnitsArray = Object.entries(subUnitsObj).map(([subUnitId, subVal]) => ({
                 sub_unit_id: subUnitId,
-                title: subVal.title || subVal.name || "Untitled Lecture",
-                type: subVal.type || "video" // pdf, video, mcq, coding
+                // We now check for 'sub-unit-name' first!
+                title: subVal['sub-unit-name'] || subVal.title || subVal.name || "Untitled Lecture",
+                type: subVal.type || "video"
             }));
 
-            // 3. HARDCODED ANALYTICS LOGIC
-            // User Rule: "Completion rate is only depends on mcq and coding not the pdf"
-            // We simulate this by returning high completion for units with coding/mcq
+            // Hardcoded Analytics Logic...
             const isAssessmentUnit = subUnitsArray.some(s => s.type === 'mcq' || s.type === 'coding');
 
             return {
                 unit_id: unitId,
                 unit_name: unitVal['unit-name'] || "Untitled Unit",
                 total_sub_units: subUnitsArray.length,
-
-                // The Requested Hardcoded Analytics
                 analytics: {
-                    completion_rate: isAssessmentUnit ? 75 : 0, // 75% if it has assessments
+                    completion_rate: isAssessmentUnit ? 75 : 0,
                     average_mcq_score: 82,
                     average_coding_score: 65,
                     status: "In Progress",
                     active_students: 140
                 },
-
                 sub_units: subUnitsArray
             };
         });
