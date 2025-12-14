@@ -272,7 +272,7 @@ router.get('/admin/students/:section', authenticateAdmin, async (req, res) => {
 });
 
 // --- GET COURSE STRUCTURE WITH ANALYTICS (Firebase + Hardcoded Stats) ---
-router.get('/university/admin/course-structure/:courseId', authenticateAdmin, async (req, res) => {
+router.get('/admin/course-structure/:courseId', authenticateAdmin, async (req, res) => {
     try {
         const { courseId } = req.params;
 
