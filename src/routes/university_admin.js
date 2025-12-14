@@ -491,4 +491,195 @@ router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (re
     }
 });
 
+// --- CONSTANTS ---
+const PASS_THRESHOLD = 0.40; // 40% to pass
+
+// --- HELPER: Extract Time Taken from Analytics JSON ---
+const getTimeTaken = (analytics) => {
+    // Tries to find time in various common structures inside your JSON
+    if (!analytics) return 0;
+    if (analytics.timeTaken) return Number(analytics.timeTaken);
+    if (analytics.duration) return Number(analytics.duration);
+    // Add other paths if your JSON structure varies
+    return 0;
+};
+
+// --- HELPER: Generate Personalized Suggestions ---
+const generateSuggestions = (metrics, isPass) => {
+    const suggestions = [];
+    if (metrics.faceWarnings >= 10) suggestions.push('High face warnings detected. Ensure proper lighting and keep face visible.');
+    if (metrics.lostFocus >= 3) suggestions.push('Frequent focus loss detected. Minimize tab switching and full-screen exits.');
+    if (metrics.disconnects >= 1) suggestions.push('Internet instability detected. Use a wired connection if possible.');
+    if (metrics.timeTaken > 30 * 60) suggestions.push('Time taken is high. Practice time management strategies.');
+    if (!isPass) suggestions.push('Score below passing threshold. Review core concepts and attempt formative questions.');
+    return suggestions;
+};
+
+// --- MAIN ANALYTICS ENDPOINT ---
+router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, res) => {
+    try {
+        const { student_id, uni_reg_id, course_id, unit_id, sub_unit_id, result_type = 'coding', attempt } = req.body;
+
+        // 1. Resolve Student ID (if only Reg ID is sent)
+        let targetStudentId = student_id;
+        if (!targetStudentId && uni_reg_id) {
+            const { data: s } = await supabase.from('students').select('student_id').eq('uni_reg_id', uni_reg_id).single();
+            if (s) targetStudentId = s.student_id;
+        }
+
+        if (!targetStudentId) return res.status(400).json({ error: "Student ID or Uni Reg ID required" });
+
+        // ---------------------------------------------------------
+        // MODE A: DEEP DIVE (Specific Attempt Details)
+        // ---------------------------------------------------------
+        if (attempt !== undefined && attempt !== null) {
+
+            // A1. Fetch the Result Row
+            const { data: resultRow, error: resultError } = await supabase
+                .from('results')
+                .select('*')
+                .eq('student_id', targetStudentId)
+                .eq('course_id', course_id)
+                .eq('unit_id', unit_id)
+                .eq('sub_unit_id', sub_unit_id)
+                .eq('attempt_count', attempt)
+                .single();
+
+            if (resultError || !resultRow) {
+                return res.status(404).json({ success: false, message: "Attempt not found" });
+            }
+
+            // A2. Fetch Submissions (Actual Code/MCQ Answers)
+            const { data: submissions } = await supabase
+                .from('student_submission')
+                .select('*')
+                .eq('student_id', targetStudentId)
+                .eq('course_id', course_id)
+                .eq('unit_id', unit_id)
+                .eq('sub_unit_id', sub_unit_id)
+                .eq('attempt', attempt);
+
+            // A3. Process Analytics Data
+            const analytics = resultRow.analytics || {};
+            const score = Number(resultRow.marks_obtained) || 0;
+            const total = Number(resultRow.total_marks) || 100; // Prevent div by 0
+            const percent = Math.round((score / total) * 100);
+            const isPass = percent >= (PASS_THRESHOLD * 100);
+
+            // Extract Proctoring Metrics (Flattening the JSON)
+            const proctoringMetrics = {
+                faceWarnings: analytics.faceWarnings || 0,
+                lostFocus: analytics.lostFocusCount || 0,
+                disconnects: analytics.internetDisconnects || 0,
+                blockedSeconds: analytics.blockedSeconds || 0,
+                timeTaken: getTimeTaken(analytics)
+            };
+
+            // A4. Generate Response
+            return res.json({
+                success: true,
+                mode: "deep_dive",
+                data: {
+                    attempt_info: {
+                        attempt_number: resultRow.attempt_count,
+                        submitted_at: resultRow.submitted_at,
+                        score,
+                        total,
+                        percent,
+                        status: isPass ? "Pass" : "Fail"
+                    },
+                    proctoring: proctoringMetrics,
+                    suggestions: generateSuggestions(proctoringMetrics, isPass),
+                    submissions: submissions || [], // The code or answers
+                    configs: {
+                        start: resultRow.start_config || {},
+                        end: resultRow.end_config || {}
+                    }
+                }
+            });
+        }
+
+        // ---------------------------------------------------------
+        // MODE B: OVERVIEW (History & Trends)
+        // ---------------------------------------------------------
+        else {
+            // B1. Fetch ALL Results for this Sub-Unit
+            const { data: allResults, error } = await supabase
+                .from('results')
+                .select('*')
+                .eq('student_id', targetStudentId)
+                .eq('course_id', course_id)
+                .eq('unit_id', unit_id)
+                .eq('sub_unit_id', sub_unit_id)
+                .order('attempt_count', { ascending: true });
+
+            if (error) throw error;
+
+            const attempts = allResults || [];
+
+            // B2. Calculate Summary Metrics
+            let bestScore = 0;
+            let totalTime = 0;
+
+            const history = attempts.map(r => {
+                const sc = Number(r.marks_obtained) || 0;
+                const tot = Number(r.total_marks) || 100;
+                const pct = Math.round((sc / tot) * 100);
+                const tm = getTimeTaken(r.analytics);
+
+                if (pct > bestScore) bestScore = pct;
+                totalTime += tm;
+
+                return {
+                    attempt: r.attempt_count,
+                    score: sc,
+                    total: tot,
+                    percent: pct,
+                    time_taken: tm,
+                    date: r.submitted_at,
+                    pass: pct >= (PASS_THRESHOLD * 100)
+                };
+            });
+
+            const avgTime = attempts.length > 0 ? Math.round(totalTime / attempts.length) : 0;
+
+            // B3. Generate Chart Data (Attempts vs Marks)
+            const chartData = history.map(h => ({
+                attempt: h.attempt,
+                percent: h.percent,
+                score: h.score
+            }));
+
+            // B4. Generate Pass Share Data
+            // (e.g., Attempt 1 Pass Rate vs Attempt 2 Pass Rate - useful if aggregating, 
+            // but for single student, it just shows if they passed that specific attempt)
+            const passShare = history.map(h => ({
+                attempt: h.attempt,
+                is_passed: h.pass
+            }));
+
+            return res.json({
+                success: true,
+                mode: "overview",
+                data: {
+                    summary: {
+                        total_attempts: attempts.length,
+                        best_score_percent: bestScore,
+                        avg_time_seconds: avgTime
+                    },
+                    history_list: history,
+                    charts: {
+                        attempt_vs_marks: chartData,
+                        pass_share: passShare
+                    }
+                }
+            });
+        }
+
+    } catch (e) {
+        console.error("Sub-Unit Analytics Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR", details: e.message });
+    }
+});
+
 module.exports = router;
