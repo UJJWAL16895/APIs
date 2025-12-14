@@ -3,6 +3,8 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const { createClient } = require('@supabase/supabase-js');
+const { initializeApp } = require('firebase/app');
+const { getDatabase, ref, get } = require('firebase/database');
 require('dotenv').config();
 
 // --- INIT ---
@@ -10,6 +12,19 @@ require('dotenv').config();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-change-in-prod';
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Initialize Firebase
+const firebaseConfig = {
+    apiKey: process.env.FIREBASE_API_KEY,
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+    databaseURL: process.env.FIREBASE_DATABASE_URL,
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.FIREBASE_APP_ID
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const database = getDatabase(firebaseApp);
 
 // --- MIDDLEWARE ---
 // 1. Enable Cookie Parsing for this router
@@ -251,6 +266,65 @@ router.get('/admin/students/:section', authenticateAdmin, async (req, res) => {
 
     } catch (e) {
         console.error("Fetch Students Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR" });
+    }
+});
+
+// --- GET COURSE STRUCTURE WITH ANALYTICS (Firebase + Hardcoded Stats) ---
+router.get('/university/admin/course-structure/:courseId', authenticateAdmin, async (req, res) => {
+    try {
+        const { courseId } = req.params;
+
+        // 1. Fetch Course Units from Firebase
+        // Path: EduCode/Courses/{courseId}/units
+        const unitsRef = ref(database, `EduCode/Courses/${courseId}/units`);
+        const snapshot = await get(unitsRef);
+
+        if (!snapshot.exists()) {
+            return res.json({ success: true, data: [] });
+        }
+
+        const unitsData = snapshot.val();
+
+        // 2. Transform Data & Add Hardcoded Analytics
+        // We convert the Firebase Object (Key-Value) into an Array
+        const unitsArray = Object.entries(unitsData).map(([unitId, unitVal]) => {
+
+            // Extract Sub-Units (if any)
+            const subUnitsObj = unitVal['sub-units'] || {};
+            const subUnitsArray = Object.entries(subUnitsObj).map(([subUnitId, subVal]) => ({
+                sub_unit_id: subUnitId,
+                title: subVal.title || subVal.name || "Untitled Lecture",
+                type: subVal.type || "video" // pdf, video, mcq, coding
+            }));
+
+            // 3. HARDCODED ANALYTICS LOGIC
+            // User Rule: "Completion rate is only depends on mcq and coding not the pdf"
+            // We simulate this by returning high completion for units with coding/mcq
+            const isAssessmentUnit = subUnitsArray.some(s => s.type === 'mcq' || s.type === 'coding');
+
+            return {
+                unit_id: unitId,
+                unit_name: unitVal['unit-name'] || "Untitled Unit",
+                total_sub_units: subUnitsArray.length,
+
+                // The Requested Hardcoded Analytics
+                analytics: {
+                    completion_rate: isAssessmentUnit ? 75 : 0, // 75% if it has assessments
+                    average_mcq_score: 82,
+                    average_coding_score: 65,
+                    status: "In Progress",
+                    active_students: 140
+                },
+
+                sub_units: subUnitsArray
+            };
+        });
+
+        res.json({ success: true, data: unitsArray });
+
+    } catch (e) {
+        console.error("Fetch Course Structure Error:", e);
         res.status(500).json({ error: "SERVER_ERROR" });
     }
 });

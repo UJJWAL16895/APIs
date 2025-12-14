@@ -125,28 +125,28 @@ router.get('/masters/sections', async (req, res) => {
 });
 
 // 2. GET COURSE STRUCTURE
-router.get('/courses/:batchId', async (req, res) => {
-    try {
-        const { batchId } = req.params;
-        const { data: batchData, error: batchError } = await supabase
-            .from('batches')
-            .select('registered_courses_id')
-            .eq('batch_id', batchId)
-            .single();
+// router.get('/courses/:batchId', async (req, res) => {
+//     try {
+//         const { batchId } = req.params;
+//         const { data: batchData, error: batchError } = await supabase
+//             .from('batches')
+//             .select('registered_courses_id')
+//             .eq('batch_id', batchId)
+//             .single();
 
-        if (batchError || !batchData) throw new Error('Batch not found');
+//         if (batchError || !batchData) throw new Error('Batch not found');
 
-        const { data: courses, error: courseError } = await supabase
-            .from('courses')
-            .select('course_id, course_name')
-            .in('course_id', batchData.registered_courses_id || []);
+//         const { data: courses, error: courseError } = await supabase
+//             .from('courses')
+//             .select('course_id, course_name')
+//             .in('course_id', batchData.registered_courses_id || []);
 
-        if (courseError) throw courseError;
-        res.json({ success: true, data: courses });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
+//         if (courseError) throw courseError;
+//         res.json({ success: true, data: courses });
+//     } catch (e) {
+//         res.status(500).json({ success: false, error: e.message });
+//     }
+// });
 
 router.get('/structure/:courseId', async (req, res) => {
     try {
