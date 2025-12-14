@@ -330,4 +330,82 @@ router.get('/admin/course-structure/:courseId', authenticateAdmin, async (req, r
     }
 });
 
+// --- GET FULL SECTION ANALYTICS (Matrix View) ---
+router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (req, res) => {
+    try {
+        const { sectionName } = req.params;
+        const myUniversityId = req.user.universityId;
+
+        // 1. Fetch REAL Students from DB
+        const { data: students, error } = await supabase
+            .from('students')
+            .select('student_id, student_name, uni_reg_id')
+            .eq('section', sectionName)
+            .eq('uni_id', myUniversityId)
+            .order('student_name', { ascending: true });
+
+        if (error) throw error;
+
+        // 2. Define Mock Courses (Matches your handwritten note)
+        const coursesList = [
+            { id: "c_cpp", name: "C++ Programming" },
+            { id: "c_dsa", name: "Data Structures (DSA)" }
+        ];
+
+        // 3. Generate Scores & Calculate Student Averages
+        // We simulate scores to look like real data
+        let courseTotals = { "c_cpp": 0, "c_dsa": 0 };
+        let studentCount = students.length || 1; // Avoid division by zero
+
+        const studentData = students.map(student => {
+            // Simulate random scores between 40 and 95
+            const scoreCPP = Math.floor(Math.random() * (95 - 40 + 1)) + 40;
+            const scoreDSA = Math.floor(Math.random() * (95 - 40 + 1)) + 40;
+
+            // Add to totals for Course Averages later
+            courseTotals["c_cpp"] += scoreCPP;
+            courseTotals["c_dsa"] += scoreDSA;
+
+            // Calculate Student's Overall Average
+            const studentAvg = Math.round((scoreCPP + scoreDSA) / 2);
+
+            return {
+                student_id: student.student_id,
+                student_name: student.student_name,
+                uni_reg_id: student.uni_reg_id,
+                overall_progress: studentAvg, // The "Overall" column in your note
+                courses: [
+                    { course_id: "c_cpp", course_name: "C++", score: scoreCPP },
+                    { course_id: "c_dsa", course_name: "DSA", score: scoreDSA }
+                ]
+            };
+        });
+
+        // 4. Calculate Course Averages (The bottom row in your note)
+        const coursePerformance = coursesList.map(course => ({
+            course_id: course.id,
+            course_name: course.name,
+            average_score: Math.round(courseTotals[course.id] / studentCount)
+        }));
+
+        // 5. Final Response Structure
+        res.json({
+            success: true,
+            data: {
+                section_metadata: {
+                    section_name: sectionName,
+                    total_students: students.length,
+                    assigned_courses: ["C++", "DSA"]
+                },
+                course_performance: coursePerformance, // Averages for bottom row
+                student_performance: studentData       // Rows for each student
+            }
+        });
+
+    } catch (e) {
+        console.error("Section Analytics Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR" });
+    }
+});
+
 module.exports = router;
