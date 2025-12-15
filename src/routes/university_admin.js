@@ -491,28 +491,12 @@ router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (re
     }
 });
 
-// --- HELPER: Parse Timestamps ---
-const calculateTiming = (resultRow) => {
-    if (!resultRow) return { start_time: null, end_time: null, duration_formatted: "N/A" };
-    const end = resultRow.submitted_at ? new Date(resultRow.submitted_at) : new Date();
-    let durationSec = 0;
-    if (resultRow.analytics?.timeTaken) durationSec = Number(resultRow.analytics.timeTaken);
-    else if (resultRow.analytics?.duration) durationSec = Number(resultRow.analytics.duration);
-    if (durationSec === 0) durationSec = 2700;
-    const start = new Date(end.getTime() - (durationSec * 1000));
-    return {
-        start_time: start.toISOString(),
-        end_time: end.toISOString(),
-        duration_formatted: `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`,
-        duration_seconds: durationSec
-    };
-};
-
 // --- HELPER: Suggestions ---
 const generateDeepSuggestions = (metrics, isPass) => {
     const suggestions = [];
     if (metrics.faceWarnings > 5) suggestions.push('⚠️ High Face Warnings: Ensure your face is fully visible.');
     if (metrics.focus_lost_count > 3) suggestions.push('⚠️ Focus Lost: Avoid switching tabs.');
+    if (metrics.disconnects > 0) suggestions.push('⚠️ Network Issues: Use a stable connection.');
     if (!isPass) suggestions.push('📚 Concept Review: Score is low. Revise the topic.');
     return suggestions;
 };
@@ -527,7 +511,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
 
         const attemptNum = Number(attempt);
 
-        // 1. Fetch Result Row (Postgres) - FIXED: Now filters by result_type
+        // 1. Fetch Result Row (Postgres)
         const { data: resultRow } = await supabase
             .from('results')
             .select('*')
@@ -536,7 +520,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
             .eq('unit_id', unit_id)
             .eq('sub_unit_id', sub_unit_id)
             .eq('attempt_count', attemptNum)
-            .eq('result_type', result_type) // <--- CRITICAL FIX: Ensures we get the correct scores
+            .eq('result_type', result_type) // Filter by type to get correct marks
             .limit(1)
             .maybeSingle();
 
@@ -626,7 +610,17 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
 
                     const totalMarks = hiddenTC.length * 10;
 
-                    // FIX: Removed status, time, is_hidden
+                    // Get Right Answer
+                    let rightCode = "// Solution not available";
+                    if (firebaseData['compiler-code']) {
+                        // Handle if it's stored as object or string
+                        if (typeof firebaseData['compiler-code'] === 'object') {
+                            rightCode = firebaseData['compiler-code'].code || JSON.stringify(firebaseData['compiler-code']);
+                        } else {
+                            rightCode = firebaseData['compiler-code'];
+                        }
+                    }
+
                     const allTestCases = [
                         ...sampleTC.map((tc, i) => ({
                             name: `Sample Case ${i + 1}`,
@@ -646,6 +640,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                         question_title: firebaseData['question-description'] ? "Coding Problem" : `Question ${questionId}`,
                         question_desc: firebaseData['question-description'] || "Description unavailable",
                         submitted_answer: sub.last_submitted_code || "// No code",
+                        correct_code: rightCode, // <--- NEW FIELD
                         status: sub.status,
                         is_submitted: isSubmitted,
                         score_obtained: sub.score,
@@ -697,8 +692,8 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                     status: isPass ? "Passed" : "Failed",
                     total_score: score,
                     max_score: total,
-                    percentage: percent,
-                    ...calculateTiming(resultRow)
+                    percentage: percent
+                    // Removed Timing Fields
                 },
                 completion_stats: completionStats,
                 proctoring_metrics: {
