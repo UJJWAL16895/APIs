@@ -527,7 +527,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
 
         const attemptNum = Number(attempt);
 
-        // 1. Fetch Result Row (Postgres)
+        // 1. Fetch Result Row (Postgres) - FIXED: Now filters by result_type
         const { data: resultRow } = await supabase
             .from('results')
             .select('*')
@@ -536,6 +536,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
             .eq('unit_id', unit_id)
             .eq('sub_unit_id', sub_unit_id)
             .eq('attempt_count', attemptNum)
+            .eq('result_type', result_type) // <--- CRITICAL FIX: Ensures we get the correct scores
             .limit(1)
             .maybeSingle();
 
@@ -566,13 +567,11 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                 subUnitMeta = snap.val();
 
                 if (result_type === 'mcq') {
-                    // Filter: Only look at MCQ keys
                     const mcqObj = subUnitMeta.mcq || {};
                     validQuestionIds = Object.keys(mcqObj);
                     totalAvailable = validQuestionIds.length;
                     totalToShow = Number(subUnitMeta['mcq-question-to-show']) || totalAvailable;
                 } else {
-                    // Filter: Only look at Coding keys
                     const codingObj = subUnitMeta.coding || {};
                     validQuestionIds = Object.keys(codingObj);
                     totalAvailable = validQuestionIds.length;
@@ -583,12 +582,12 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
             console.error("Firebase Meta Fetch Error:", fbErr);
         }
 
-        // 4. FILTER SUBMISSIONS (Removes Wrong Types)
+        // 4. FILTER SUBMISSIONS
         const filteredSubmissions = (dbSubmissions || []).filter(sub =>
             validQuestionIds.includes(sub.question_id)
         );
 
-        // 5. CALCULATE STATS (Corrected Logic)
+        // 5. CALCULATE STATS
         const userSubmittedCount = filteredSubmissions.length;
         let completionPct = totalToShow > 0 ? Math.round((userSubmittedCount / totalToShow) * 100) : 0;
         if (completionPct > 100) completionPct = 100;
@@ -606,7 +605,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
             completionStats.question_completion_percentage = completionPct;
         }
 
-        // 6. ENRICH SUBMISSIONS (Fetch Details & Real Test Cases)
+        // 6. ENRICH SUBMISSIONS
         let enrichedSubmissions = [];
         if (filteredSubmissions.length > 0) {
             enrichedSubmissions = await Promise.all(filteredSubmissions.map(async (sub) => {
@@ -625,26 +624,19 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                     const sampleTC = firebaseData['sample-input-output'] || [];
                     const hiddenTC = firebaseData['hidden-test-cases'] || [];
 
-                    // Logic: Each hidden test case is worth 10 marks
                     const totalMarks = hiddenTC.length * 10;
 
-                    // Map REAL data from Firebase
+                    // FIX: Removed status, time, is_hidden
                     const allTestCases = [
                         ...sampleTC.map((tc, i) => ({
                             name: `Sample Case ${i + 1}`,
                             input: tc.input || "",
-                            expected_output: tc.output || "",
-                            status: "Passed",
-                            time: "0.02s",
-                            is_hidden: false
+                            expected_output: tc.output || ""
                         })),
                         ...hiddenTC.map((tc, i) => ({
                             name: `Hidden Case ${i + 1}`,
                             input: tc.input || "[Hidden]",
-                            expected_output: tc.output || "[Hidden]",
-                            status: sub.status === 'Accepted' ? "Passed" : "Failed",
-                            time: "0.10s",
-                            is_hidden: true
+                            expected_output: tc.output || "[Hidden]"
                         }))
                     ];
 
@@ -657,7 +649,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                         status: sub.status,
                         is_submitted: isSubmitted,
                         score_obtained: sub.score,
-                        total_question_marks: totalMarks, // NEW: Dynamically calculated
+                        total_question_marks: totalMarks,
                         test_cases: allTestCases
                     };
                 } else {
@@ -708,7 +700,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                     percentage: percent,
                     ...calculateTiming(resultRow)
                 },
-                completion_stats: completionStats, // NEW: Type-specific stats
+                completion_stats: completionStats,
                 proctoring_metrics: {
                     network_health: proctoring.network_disconnects === 0 ? "Stable" : "Unstable",
                     ...proctoring
