@@ -491,14 +491,14 @@ router.get('/admin/section-analytics/:sectionName', authenticateAdmin, async (re
     }
 });
 
-/// --- HELPER: Parse Timestamps ---
+// --- HELPER: Parse Timestamps ---
 const calculateTiming = (resultRow) => {
     if (!resultRow) return { start_time: null, end_time: null, duration_formatted: "N/A" };
     const end = resultRow.submitted_at ? new Date(resultRow.submitted_at) : new Date();
     let durationSec = 0;
     if (resultRow.analytics?.timeTaken) durationSec = Number(resultRow.analytics.timeTaken);
     else if (resultRow.analytics?.duration) durationSec = Number(resultRow.analytics.duration);
-    if (durationSec === 0) durationSec = 2700; // Default 45m
+    if (durationSec === 0) durationSec = 2700;
     const start = new Date(end.getTime() - (durationSec * 1000));
     return {
         start_time: start.toISOString(),
@@ -513,7 +513,6 @@ const generateDeepSuggestions = (metrics, isPass) => {
     const suggestions = [];
     if (metrics.faceWarnings > 5) suggestions.push('⚠️ High Face Warnings: Ensure your face is fully visible.');
     if (metrics.focus_lost_count > 3) suggestions.push('⚠️ Focus Lost: Avoid switching tabs.');
-    if (metrics.disconnects > 0) suggestions.push('⚠️ Network Issues: Use a stable connection.');
     if (!isPass) suggestions.push('📚 Concept Review: Score is low. Revise the topic.');
     return suggestions;
 };
@@ -531,8 +530,8 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
         if (attempt !== undefined && attempt !== null) {
             const attemptNum = Number(attempt);
 
-            // 1. Fetch Result Row (Scores, Analytics)
-            const { data: resultRow, error: resultError } = await supabase
+            // 1. Fetch Result Row (Postgres)
+            const { data: resultRow } = await supabase
                 .from('results')
                 .select('*')
                 .eq('student_id', student_id)
@@ -543,7 +542,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                 .limit(1)
                 .maybeSingle();
 
-            // 2. Fetch User Submissions (The answers they gave)
+            // 2. Fetch Raw Submissions (Postgres) - Fetches mixed types initially
             const { data: dbSubmissions } = await supabase
                 .from('student_submission')
                 .select('*')
@@ -557,7 +556,114 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                 return res.status(404).json({ success: false, message: "No data found for this attempt" });
             }
 
-            // 3. Process Result Metrics
+            // 3. FETCH METADATA FROM FIREBASE (To fix Stats & Filtering)
+            let subUnitMeta = {};
+            let validQuestionIds = []; // IDs that belong to the requested result_type
+            let totalAvailable = 0;    // Total questions existing in DB
+            let totalToShow = 0;       // The limit set by admin
+
+            try {
+                const subUnitRef = ref(database, `EduCode/Courses/${course_id}/units/${unit_id}/sub-units/${sub_unit_id}`);
+                const snap = await get(subUnitRef);
+                if (snap.exists()) {
+                    subUnitMeta = snap.val();
+
+                    if (result_type === 'mcq') {
+                        // Get MCQ Keys
+                        const mcqObj = subUnitMeta.mcq || {};
+                        validQuestionIds = Object.keys(mcqObj);
+                        totalAvailable = validQuestionIds.length;
+                        // Get Limit (Default to total if not set)
+                        totalToShow = Number(subUnitMeta['mcq-question-to-show']) || totalAvailable;
+                    } else {
+                        // Get Coding Keys
+                        const codingObj = subUnitMeta.coding || {};
+                        validQuestionIds = Object.keys(codingObj);
+                        totalAvailable = validQuestionIds.length;
+                        // Get Limit (Default to total if not set)
+                        totalToShow = Number(subUnitMeta['questions-to-show']) || totalAvailable;
+                    }
+                }
+            } catch (fbErr) {
+                console.error("Firebase Meta Fetch Error:", fbErr);
+            }
+
+            // 4. FILTER SUBMISSIONS (Fixes the mixed content issue)
+            // Only keep submissions that match the IDs found in Firebase for this result_type
+            const filteredSubmissions = (dbSubmissions || []).filter(sub =>
+                validQuestionIds.includes(sub.question_id)
+            );
+
+            // 5. CALCULATE STATS (Fixes the counting issue)
+            const userSubmittedCount = filteredSubmissions.length;
+            // Cap percentage at 100 in case they submitted extra
+            let completionPct = totalToShow > 0 ? Math.round((userSubmittedCount / totalToShow) * 100) : 0;
+            if (completionPct > 100) completionPct = 100;
+
+            const completionStats = {};
+            if (result_type === 'mcq') {
+                completionStats.total_mcq = totalAvailable;
+                completionStats.total_mcq_show = totalToShow;
+                completionStats.user_submitted_count = userSubmittedCount;
+                completionStats.completion_percentage = completionPct;
+            } else {
+                completionStats.total_coding = totalAvailable;
+                completionStats.total_coding_show = totalToShow;
+                completionStats.user_submitted_count = userSubmittedCount;
+                completionStats.completion_percentage = completionPct;
+            }
+
+            // 6. ENRICH SUBMISSIONS (Fetch details from Firebase)
+            let enrichedSubmissions = [];
+            if (filteredSubmissions.length > 0) {
+                enrichedSubmissions = await Promise.all(filteredSubmissions.map(async (sub) => {
+                    const questionId = sub.question_id;
+                    let firebaseData = {};
+
+                    try {
+                        const qRef = ref(database, `EduCode/Courses/${course_id}/units/${unit_id}/sub-units/${sub_unit_id}/${result_type}/${questionId}`);
+                        const qSnapshot = await get(qRef);
+                        if (qSnapshot.exists()) firebaseData = qSnapshot.val();
+                    } catch (err) { }
+
+                    if (result_type === 'coding') {
+                        const sampleTC = firebaseData['sample-input-output'] || [];
+                        const hiddenTC = firebaseData['hidden-test-cases'] || [];
+                        const allTestCases = [
+                            ...sampleTC.map((tc, i) => ({ name: `Sample ${i + 1}`, status: "Passed", time: "0.02s", is_hidden: false })),
+                            ...hiddenTC.map((tc, i) => ({ name: `Hidden ${i + 1}`, status: sub.status === 'Accepted' ? "Passed" : "Failed", time: "0.10s", is_hidden: true }))
+                        ];
+                        return {
+                            type: "coding",
+                            question_id: questionId,
+                            question_title: firebaseData['question-description'] ? "Coding Problem" : `Question ${questionId}`,
+                            question_desc: firebaseData['question-description'] || "Description unavailable",
+                            submitted_answer: sub.last_submitted_code || "// No code",
+                            status: sub.status,
+                            score_obtained: sub.score,
+                            test_cases: allTestCases
+                        };
+                    } else {
+                        // MCQ
+                        const options = firebaseData['options'] || [];
+                        const userChoiceIndex = parseInt(sub.last_submitted_code || "-1");
+                        const userSelectedOption = options[userChoiceIndex] || { option: "Unknown" };
+
+                        return {
+                            type: "mcq",
+                            question_id: questionId,
+                            question_title: firebaseData['question'] || "MCQ Question",
+                            options: options,
+                            submitted_answer_index: userChoiceIndex,
+                            submitted_answer_text: userSelectedOption.option,
+                            is_correct: userSelectedOption.isAnswer || false,
+                            score_obtained: sub.score
+                        };
+                    }
+                }));
+            }
+
+            // 7. Process Other Metrics
             const analytics = resultRow?.analytics || {};
             const score = Number(resultRow?.marks_obtained) || 0;
             const total = Number(resultRow?.total_marks) || 100;
@@ -572,115 +678,6 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                 tab_switches: analytics.tabSwitches || 0
             };
 
-            // 4. FETCH FIREBASE DATA & ENRICH SUBMISSIONS
-            let enrichedSubmissions = [];
-
-            if (dbSubmissions && dbSubmissions.length > 0) {
-                enrichedSubmissions = await Promise.all(dbSubmissions.map(async (sub) => {
-                    const questionId = sub.question_id;
-                    let firebaseData = {};
-                    
-                    // -- A. FETCH FROM FIREBASE --
-                    try {
-                        // Dynamic Path: Uses result_type ('mcq' or 'coding')
-                        const qRef = ref(database, `EduCode/Courses/${course_id}/units/${unit_id}/sub-units/${sub_unit_id}/${result_type}/${questionId}`);
-                        const qSnapshot = await get(qRef);
-                        if (qSnapshot.exists()) firebaseData = qSnapshot.val();
-                    } catch (err) { console.error("Firebase Fetch Error:", err); }
-
-                    // -- B. HANDLE CODING QUESTIONS --
-                    if (result_type === 'coding') {
-                        // Extract Test Cases
-                        const sampleTC = firebaseData['sample-input-output'] || [];
-                        const hiddenTC = firebaseData['hidden-test-cases'] || [];
-                        const allTestCases = [
-                            ...sampleTC.map((tc, i) => ({ name: `Sample ${i+1}`, status: "Passed", time: "0.02s", is_hidden: false })),
-                            ...hiddenTC.map((tc, i) => ({ name: `Hidden ${i+1}`, status: sub.status === 'Accepted' ? "Passed" : "Failed", time: "0.10s", is_hidden: true }))
-                        ];
-
-                        return {
-                            type: "coding",
-                            question_id: questionId,
-                            question_title: firebaseData['question-description'] ? "Coding Problem" : `Question ${questionId}`,
-                            question_desc: firebaseData['question-description'] || "Description unavailable",
-                            submitted_answer: sub.last_submitted_code || "// No code",
-                            status: sub.status,
-                            score_obtained: sub.score,
-                            test_cases: allTestCases
-                        };
-                    } 
-                    
-                    // -- C. HANDLE MCQ QUESTIONS --
-                    else {
-                        const options = firebaseData['options'] || [];
-                        const userChoiceIndex = parseInt(sub.last_submitted_code || "-1");
-                        const userSelectedOption = options[userChoiceIndex] || { option: "Unknown / No Selection" };
-                        
-                        return {
-                            type: "mcq",
-                            question_id: questionId,
-                            question_title: firebaseData['question'] || "MCQ Question",
-                            options: options, // Return full options for UI to render
-                            submitted_answer_index: userChoiceIndex,
-                            submitted_answer_text: userSelectedOption.option,
-                            is_correct: userSelectedOption.isAnswer || false,
-                            score_obtained: sub.score
-                        };
-                    }
-                }));
-            }
-
-            // 5. CALCULATE COMPLETION STATS (50% MCQ + 50% Coding)
-            // A. Fetch Sub-Unit Metadata from Firebase for TOTALS
-            let totalMCQ = 10; // Default fallback
-            let totalCoding = 5; // Default fallback
-            try {
-                const subUnitRef = ref(database, `EduCode/Courses/${course_id}/units/${unit_id}/sub-units/${sub_unit_id}`);
-                const snap = await get(subUnitRef);
-                if (snap.exists()) {
-                    const data = snap.val();
-                    // Some nodes have explicit counts, others we count keys
-                    totalMCQ = data['total-mcq-questions'] || (data['mcq'] ? Object.keys(data['mcq']).length : 0) || 1;
-                    totalCoding = data['total-coding-questions'] || (data['coding'] ? Object.keys(data['coding']).length : 0) || 1;
-                }
-            } catch (e) {}
-
-            // B. Count Student Submissions (Unique Questions Attempted)
-            // We need to count ALL unique submissions for this student in this sub-unit (not just this attempt)
-            const { data: allStudentSubs } = await supabase
-                .from('student_submission')
-                .select('question_id, last_submitted_code') // We infer type from question_id or context
-                .eq('student_id', student_id)
-                .eq('sub_unit_id', sub_unit_id);
-
-            // Simple heuristic: If we are in 'mcq' mode, we assume these are MCQs, etc.
-            // A better way is to check question existence in the enriched array, but for total stats:
-            // We will count current submissions. For accurate "Unit" stats, we need a broader query.
-            // Here we calculate stats for THIS sub-unit based on `result_type` mainly.
-            
-            // NOTE: To do 50/50, we need to know how many MCQs they did vs Coding.
-            // Since `student_submission` doesn't strictly say "mcq", we rely on the current request's context 
-            // or assume we fetched mixed data. 
-            // *Optimization:* We will calculate completion for the CURRENT type strictly, 
-            // and estimate the other, or return separate counters.
-
-            const submittedCount = new Set(allStudentSubs?.map(s => s.question_id)).size;
-            
-            // Logic: If current view is Coding, `submittedCount` is for coding.
-            // If current view is MCQ, `submittedCount` is for MCQ.
-            // We will return the raw numbers so Frontend can render the bars.
-            
-            const completionStats = {
-                sub_unit: {
-                    total_mcq: totalMCQ,
-                    total_coding: totalCoding,
-                    // We map the counts based on current result_type
-                    user_submitted_count: submittedCount,
-                    // Simple % based on current view type (Frontend can combine if it calls API twice or we fetch both)
-                    completion_percentage: Math.round((submittedCount / (result_type === 'coding' ? totalCoding : totalMCQ)) * 100)
-                }
-            };
-
             return res.json({
                 success: true,
                 mode: "deep_dive",
@@ -693,12 +690,12 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
                         percentage: percent,
                         ...calculateTiming(resultRow)
                     },
-                    completion_stats: completionStats, // <--- NEW STATS
+                    completion_stats: completionStats, // Fixed Stats
                     proctoring_metrics: {
                         network_health: proctoring.network_disconnects === 0 ? "Stable" : "Unstable",
                         ...proctoring
                     },
-                    submissions: enrichedSubmissions,
+                    submissions: enrichedSubmissions, // Filtered Submissions
                     suggestions: generateDeepSuggestions(proctoring, isPass),
                     debug_configs: {
                         start_config: resultRow?.start_config || {},
@@ -709,7 +706,7 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
         }
 
         // =========================================================
-        // MODE B: OVERVIEW (History List)
+        // MODE B: OVERVIEW
         // =========================================================
         else {
             const { data: allResults } = await supabase
