@@ -714,4 +714,65 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
 });
+
+
+
+
+// ====================================================================
+// GET SECTIONS BY BATCH ID (With Batch & Course Details)
+// ====================================================================
+router.post('/admin/get-sections-by-batch', async (req, res) => {
+    try {
+        const { batch_id } = req.body;
+
+        if (!batch_id) {
+            return res.status(400).json({ error: "batch_id is required" });
+        }
+
+        // 1. Fetch Batch Details (Name + Course Info)
+        // We assume 'batches' table has 'batch_name' and 'course_id'
+        // We assume 'courses' table has 'course_name'
+        const { data: batchData, error: batchError } = await supabase
+            .from('batches')
+            .select(`
+                batch_name,
+                course_id,
+                courses (
+                    course_name
+                )
+            `)
+            .eq('batch_id', batch_id)
+            .single();
+
+        if (batchError || !batchData) {
+            return res.status(404).json({ success: false, message: "Batch not found" });
+        }
+
+        // 2. Fetch Sections linked to this batch
+        const { data: sections, error: sectionError } = await supabase
+            .from('sections')
+            .select('*')
+            .eq('batch_id', batch_id);
+
+        if (sectionError) {
+            throw sectionError;
+        }
+
+        return res.json({
+            success: true,
+            data: {
+                batch_id: batch_id,
+                batch_name: batchData.batch_name,
+                course_id: batchData.course_id,
+                course_name: batchData.courses?.course_name || "Unknown Course",
+                total_sections: sections.length,
+                sections: sections
+            }
+        });
+
+    } catch (e) {
+        console.error("Get Sections Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR", details: e.message });
+    }
+});
 module.exports = router;
