@@ -785,4 +785,105 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
 });
+
+
+
+// ====================================================================
+// GET PRACTICE COURSES BY BATCH ID (Filters via Firebase)
+// ====================================================================
+router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
+    try {
+        const { batch_id } = req.body;
+
+        if (!batch_id) {
+            return res.status(400).json({ error: "batch_id is required" });
+        }
+
+        // 1. Fetch Batch Details (Name + Registered Course IDs)
+        const { data: batchData, error: batchError } = await supabase
+            .from('batches')
+            .select('batch_name, registered_courses_id')
+            .eq('batch_id', batch_id)
+            .single();
+
+        if (batchError || !batchData) {
+            return res.status(404).json({ success: false, message: "Batch not found" });
+        }
+
+        const courseIds = batchData.registered_courses_id || [];
+
+        if (courseIds.length === 0) {
+            return res.json({
+                success: true,
+                data: {
+                    batch_id,
+                    batch_name: batchData.batch_name,
+                    courses: []
+                }
+            });
+        }
+
+        // 2. Fetch Course Names from Supabase
+        const { data: coursesData } = await supabase
+            .from('courses')
+            .select('course_id, course_name')
+            .in('course_id', courseIds);
+
+        if (!coursesData || coursesData.length === 0) {
+            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, courses: [] } });
+        }
+
+        // 3. Filter Courses: Check Firebase for "sub_type: practice"
+        // We use Promise.all to check all courses in parallel for speed
+        const validCourses = [];
+
+        await Promise.all(coursesData.map(async (course) => {
+            try {
+                // Fetch Units for this course
+                const unitsRef = ref(database, `EduCode/Courses/${course.course_id}/units`);
+                const snapshot = await get(unitsRef);
+
+                if (snapshot.exists()) {
+                    const units = snapshot.val();
+                    let hasPractice = false;
+
+                    // Deep Search: Look for ANY sub-unit with sub_type === 'practice'
+                    // We break loops early (using some/foreach logic) once found to save time
+                    for (const unitKey in units) {
+                        const subUnits = units[unitKey]['sub-units'];
+                        if (subUnits) {
+                            for (const subKey in subUnits) {
+                                if (subUnits[subKey]['sub_type'] === 'practice') {
+                                    hasPractice = true;
+                                    break; // Found one! No need to check rest of this course
+                                }
+                            }
+                        }
+                        if (hasPractice) break;
+                    }
+
+                    if (hasPractice) {
+                        validCourses.push(course);
+                    }
+                }
+            } catch (err) {
+                console.error(`Error checking course ${course.course_id}:`, err);
+            }
+        }));
+
+        return res.json({
+            success: true,
+            data: {
+                batch_id: batch_id,
+                batch_name: batchData.batch_name,
+                total_practice_courses: validCourses.length,
+                courses: validCourses // Contains only courses with practice content
+            }
+        });
+
+    } catch (e) {
+        console.error("Get Practice Courses Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR", details: e.message });
+    }
+});
 module.exports = router;
