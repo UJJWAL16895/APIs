@@ -721,6 +721,9 @@ router.post('/admin/analytics/sub-unit-details', authenticateAdmin, async (req, 
 // ====================================================================
 // GET SECTIONS BY BATCH ID (With Batch & Course Details)
 // ====================================================================
+// ====================================================================
+// GET SECTIONS BY BATCH ID (Fetching from Students & Batches Tables)
+// ====================================================================
 router.post('/admin/get-sections-by-batch', async (req, res) => {
     try {
         const { batch_id } = req.body;
@@ -729,18 +732,10 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
             return res.status(400).json({ error: "batch_id is required" });
         }
 
-        // 1. Fetch Batch Details (Name + Course Info)
-        // We assume 'batches' table has 'batch_name' and 'course_id'
-        // We assume 'courses' table has 'course_name'
+        // 1. Fetch Batch Details (Name + Registered Course IDs)
         const { data: batchData, error: batchError } = await supabase
             .from('batches')
-            .select(`
-                batch_name,
-                course_id,
-                courses (
-                    course_name
-                )
-            `)
+            .select('batch_name, registered_courses_id')
             .eq('batch_id', batch_id)
             .single();
 
@@ -748,25 +743,40 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
             return res.status(404).json({ success: false, message: "Batch not found" });
         }
 
-        // 2. Fetch Sections linked to this batch
-        const { data: sections, error: sectionError } = await supabase
-            .from('sections')
-            .select('*')
+        // 2. Fetch Course Details
+        // The batch stores an array of course IDs (uuid[])
+        let coursesList = [];
+        if (batchData.registered_courses_id && batchData.registered_courses_id.length > 0) {
+            const { data: courses } = await supabase
+                .from('courses')
+                .select('course_id, course_name')
+                .in('course_id', batchData.registered_courses_id);
+
+            coursesList = courses || [];
+        }
+
+        // 3. Fetch Distinct Sections from Students Table
+        // Since there is no 'sections' table, we find which sections exist for this batch in 'students'
+        const { data: studentsData, error: studentError } = await supabase
+            .from('students')
+            .select('section')
             .eq('batch_id', batch_id);
 
-        if (sectionError) {
-            throw sectionError;
+        if (studentError) {
+            throw studentError;
         }
+
+        // Filter unique sections using a Set
+        const uniqueSections = [...new Set((studentsData || []).map(s => s.section).filter(Boolean))].sort();
 
         return res.json({
             success: true,
             data: {
                 batch_id: batch_id,
                 batch_name: batchData.batch_name,
-                course_id: batchData.course_id,
-                course_name: batchData.courses?.course_name || "Unknown Course",
-                total_sections: sections.length,
-                sections: sections
+                courses: coursesList, // Returns an array since a batch can have multiple courses
+                total_sections: uniqueSections.length,
+                sections: uniqueSections // List of section names (e.g., ["A", "B", "C"])
             }
         });
 
