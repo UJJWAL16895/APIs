@@ -348,6 +348,9 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
 /// ====================================================================
 // GET SECTION EXAM PROGRESS (Reverse Batch Lookup)
 // ====================================================================
+// ====================================================================
+// GET SECTION EXAM PROGRESS & MARKS (Detailed Report)
+// ====================================================================
 router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
     try {
         const { course_id, section_name } = req.body;
@@ -357,9 +360,9 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
         }
 
         // ---------------------------------------------------------
-        // 1. REVERSE LOOKUP: Find Batch that contains this Course
+        // 1. REVERSE LOOKUP: Find Batch for this Course
         // ---------------------------------------------------------
-        // We look inside the 'batches' table array column 'registered_courses_id'
+        // We find which batch has this course in its registered_courses_id array
         const { data: batchData, error: batchError } = await supabase
             .from('batches')
             .select('batch_id')
@@ -373,16 +376,13 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
         }
 
         if (!batchData) {
-            return res.status(404).json({
-                success: false,
-                message: "No batch found containing this course ID."
-            });
+            return res.status(404).json({ success: false, message: "No batch found for this course." });
         }
 
         const batchId = batchData.batch_id;
 
         // ---------------------------------------------------------
-        // 2. FETCH STUDENTS IN SECTION & BATCH
+        // 2. FETCH STUDENTS
         // ---------------------------------------------------------
         const { data: students, error: studentError } = await supabase
             .from('students')
@@ -397,7 +397,7 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
                 success: true,
                 data: {
                     section_name,
-                    message: "No students found in this section for the linked batch.",
+                    message: "No students found in this section.",
                     students: []
                 }
             });
@@ -406,29 +406,22 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
         const studentIds = students.map(s => s.student_id);
 
         // ---------------------------------------------------------
-        // 3. BUILD "EXAM BLUEPRINT" FROM FIREBASE
+        // 3. EXAM BLUEPRINT (Firebase)
         // ---------------------------------------------------------
-        let examBlueprint = [];
-
+        let examBlueprint = []; 
         try {
             const courseRef = ref(database, `EduCode/Courses/${course_id}/units`);
             const snap = await get(courseRef);
-
             if (snap.exists()) {
                 const unitsData = snap.val();
-
                 Object.keys(unitsData).forEach(unitKey => {
                     const subUnits = unitsData[unitKey]['sub-units'] || {};
-
                     Object.keys(subUnits).forEach(subKey => {
                         const subMeta = subUnits[subKey];
-
-                        // STRICT FILTER: Only 'exam' type
+                        // STRICT FILTER: 'exam' only
                         if (subMeta['sub_type'] === 'exam') {
-
-                            const hasMCQ = subMeta.mcq !== undefined || (subMeta['total-mcq-questions'] && subMeta['total-mcq-questions'] > 0);
-                            const hasCoding = subMeta.coding !== undefined || (subMeta['total-coding-questions'] && subMeta['total-coding-questions'] > 0);
-
+                            const hasMCQ = subMeta.mcq !== undefined || (subMeta['total-mcq-questions'] > 0);
+                            const hasCoding = subMeta.coding !== undefined || (subMeta['total-coding-questions'] > 0);
                             if (hasMCQ || hasCoding) {
                                 examBlueprint.push({
                                     sub_unit_id: subKey,
@@ -446,38 +439,45 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
         }
 
         const totalExamItems = examBlueprint.length;
-
         if (totalExamItems === 0) {
-            return res.json({ success: true, data: { section_name, message: "No exams found in this course.", students: [] } });
+             return res.json({ success: true, data: { section_name, message: "No exams found in this course.", students: [] } });
         }
 
         // ---------------------------------------------------------
-        // 4. BULK FETCH RESULTS WITH CONFIGS
+        // 4. FETCH RESULTS + MARKS (Postgres)
         // ---------------------------------------------------------
+        // We select 'marks_obtained' and 'result_type' to sum them up
         const { data: allResults } = await supabase
             .from('results')
-            .select('student_id, sub_unit_id, result_type, submitted_at, start_config, end_config')
+            .select('student_id, sub_unit_id, result_type, submitted_at, marks_obtained, start_config, end_config')
             .in('student_id', studentIds)
             .eq('course_id', course_id)
             .not('submitted_at', 'is', null);
 
-        // Map for fast lookup
+        // Map for lookup
         const resultMap = new Map();
         (allResults || []).forEach(r => {
             resultMap.set(`${r.student_id}_${r.sub_unit_id}_${r.result_type}`, r);
         });
 
         // ---------------------------------------------------------
-        // 5. CALCULATE PROGRESS & EXTRACT CONFIGS
+        // 5. CALCULATE METRICS
         // ---------------------------------------------------------
         const studentProgressList = students.map(student => {
             let totalProgressSum = 0;
+            
+            // Marks Variables
+            let totalMarksObtained = 0;
+            let mcqMarks = 0;
+            let codingMarks = 0;
+
+            // Config Variables
             let foundStartConfig = {};
             let foundEndConfig = {};
 
             examBlueprint.forEach(examItem => {
                 let itemProgress = 0;
-
+                
                 const mcqKey = `${student.student_id}_${examItem.sub_unit_id}_mcq`;
                 const codingKey = `${student.student_id}_${examItem.sub_unit_id}_coding`;
 
@@ -487,24 +487,36 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
                 const didMCQ = !!mcqResult;
                 const didCoding = !!codingResult;
 
-                // --- Config Extraction (Prioritize Coding) ---
+                // --- 1. Marks Aggregation ---
+                if (didCoding) {
+                    const cMarks = Number(codingResult.marks_obtained) || 0;
+                    codingMarks += cMarks;
+                    totalMarksObtained += cMarks;
+                }
+                if (didMCQ) {
+                    const mMarks = Number(mcqResult.marks_obtained) || 0;
+                    mcqMarks += mMarks;
+                    totalMarksObtained += mMarks;
+                }
+
+                // --- 2. Config Extraction ---
                 if (didCoding) {
                     if (codingResult.start_config) foundStartConfig = codingResult.start_config;
                     if (codingResult.end_config) foundEndConfig = codingResult.end_config;
-                }
+                } 
                 else if (didMCQ) {
                     if (Object.keys(foundStartConfig).length === 0 && mcqResult.start_config) foundStartConfig = mcqResult.start_config;
                     if (Object.keys(foundEndConfig).length === 0 && mcqResult.end_config) foundEndConfig = mcqResult.end_config;
                 }
 
-                // --- 50/50 Progress Logic ---
+                // --- 3. Progress Logic ---
                 if (examItem.has_mcq && examItem.has_coding) {
                     if (didMCQ) itemProgress += 50;
                     if (didCoding) itemProgress += 50;
-                }
+                } 
                 else if (examItem.has_mcq) {
                     if (didMCQ) itemProgress = 100;
-                }
+                } 
                 else if (examItem.has_coding) {
                     if (didCoding) itemProgress = 100;
                 }
@@ -518,6 +530,11 @@ router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
                 student_name: student.student_name,
                 uni_reg_id: student.uni_reg_id,
                 exam_completion_percentage: examAvg,
+                total_marks: totalMarksObtained, // Total of both types
+                marks_breakdown: {
+                    coding_marks: codingMarks,
+                    mcq_marks: mcqMarks
+                },
                 debug_configs: {
                     start_config: foundStartConfig,
                     end_config: foundEndConfig
