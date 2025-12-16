@@ -797,7 +797,10 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
 // ====================================================================
 // GET EXAM COURSES BY BATCH ID (Strict Fix)
 // ====================================================================
-router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
+// ====================================================================
+// GET PRACTICE COURSES BY BATCH ID (Strict Fix)
+// ====================================================================
+router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
     try {
         const { batch_id } = req.body;
 
@@ -818,7 +821,7 @@ router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
 
         const courseIds = batchData.registered_courses_id || [];
         if (courseIds.length === 0) {
-            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, total_exam_courses: 0, courses: [] } });
+            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, total_practice_courses: 0, courses: [] } });
         }
 
         // 2. Fetch Course Names
@@ -828,7 +831,7 @@ router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
             .in('course_id', courseIds);
 
         if (!coursesData || coursesData.length === 0) {
-            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, total_exam_courses: 0, courses: [] } });
+            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, total_practice_courses: 0, courses: [] } });
         }
 
         // 3. Filter Courses
@@ -841,7 +844,7 @@ router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
 
                 if (snapshot.exists()) {
                     const units = snapshot.val();
-                    let hasExam = false;
+                    let hasPractice = false;
 
                     // Iterate Units
                     for (const unitKey in units) {
@@ -850,22 +853,23 @@ router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
                             // Iterate Sub-Units
                             for (const subKey in subUnits) {
                                 const rawType = subUnits[subKey]['sub_type'];
-
+                                
                                 // STRICT CHECK
                                 if (rawType && typeof rawType === 'string') {
+                                    // Normalize: Lowercase and Trim
                                     const cleanType = rawType.toLowerCase().trim();
-
-                                    if (cleanType === 'exam') {
-                                        hasExam = true;
-                                        break;
+                                    
+                                    if (cleanType === 'practice') {
+                                        hasPractice = true;
+                                        break; 
                                     }
                                 }
                             }
                         }
-                        if (hasExam) break;
+                        if (hasPractice) break; 
                     }
 
-                    if (hasExam) {
+                    if (hasPractice) {
                         validCourses.push(course);
                     }
                 }
@@ -879,13 +883,13 @@ router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
             data: {
                 batch_id: batch_id,
                 batch_name: batchData.batch_name,
-                total_exam_courses: validCourses.length,
+                total_practice_courses: validCourses.length,
                 courses: validCourses
             }
         });
 
     } catch (e) {
-        console.error("Get Exam Courses Error:", e);
+        console.error("Get Practice Courses Error:", e);
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
 });
