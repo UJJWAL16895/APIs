@@ -345,6 +345,7 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
 
 
 
+// ====================================================================
 // GET SECTION EXAM PROGRESS (Derives Batch from Course)
 // ====================================================================
 router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
