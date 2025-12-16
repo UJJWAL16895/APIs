@@ -195,15 +195,15 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
             .eq('uni_id', university_id); // Ensure we only get this uni's students
 
         if (studentError) throw studentError;
-        
+
         if (!students || students.length === 0) {
-            return res.json({ 
-                success: true, 
-                data: { 
-                    section_name, 
-                    total_students: 0, 
-                    section_overall_completion: 0 
-                } 
+            return res.json({
+                success: true,
+                data: {
+                    section_name,
+                    total_students: 0,
+                    section_overall_completion: 0
+                }
             });
         }
 
@@ -213,25 +213,25 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
         // 2. BUILD "PRACTICE BLUEPRINT" FROM FIREBASE
         // ---------------------------------------------------------
         let practiceBlueprint = []; // List of valid sub-units to check
-        
+
         try {
             const courseRef = ref(database, `EduCode/Courses/${course_id}/units`);
             const snap = await get(courseRef);
-            
+
             if (snap.exists()) {
                 const unitsData = snap.val();
-                
+
                 // Traverse Units
                 Object.keys(unitsData).forEach(unitKey => {
                     const subUnits = unitsData[unitKey]['sub-units'] || {};
-                    
+
                     // Traverse Sub-Units
                     Object.keys(subUnits).forEach(subKey => {
                         const subMeta = subUnits[subKey];
-                        
+
                         // STRICT FILTER: Only include if sub_type is "practice"
                         if (subMeta['sub_type'] === 'practice') {
-                            
+
                             // Determine requirements for 100%
                             const hasMCQ = subMeta.mcq !== undefined || (subMeta['total-mcq-questions'] && subMeta['total-mcq-questions'] > 0);
                             const hasCoding = subMeta.coding !== undefined || (subMeta['total-coding-questions'] && subMeta['total-coding-questions'] > 0);
@@ -256,7 +256,7 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
         const totalPracticeItems = practiceBlueprint.length;
 
         if (totalPracticeItems === 0) {
-             return res.json({ success: true, data: { section_name, message: "No practice content found in this course.", section_overall_completion: 0 } });
+            return res.json({ success: true, data: { section_name, message: "No practice content found in this course.", section_overall_completion: 0 } });
         }
 
         // ---------------------------------------------------------
@@ -298,10 +298,10 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
                 if (item.has_mcq && item.has_coding) {
                     if (didMCQ) itemProgress += 50;
                     if (didCoding) itemProgress += 50;
-                } 
+                }
                 else if (item.has_mcq) {
                     if (didMCQ) itemProgress = 100;
-                } 
+                }
                 else if (item.has_coding) {
                     if (didCoding) itemProgress = 100;
                 }
@@ -311,9 +311,9 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
 
             // Student Average for Course
             const studentAvg = Math.round(studentSubUnitSum / totalPracticeItems);
-            
+
             sectionTotalPercent += studentAvg;
-            
+
             studentPerformance.push({
                 student_name: student.student_name,
                 progress: studentAvg
@@ -339,6 +339,196 @@ router.post('/teacher/analytics/section-completion', async (req, res) => {
 
     } catch (e) {
         console.error("Section Analytics Error:", e);
+        res.status(500).json({ error: "SERVER_ERROR", details: e.message });
+    }
+});
+
+
+/ ====================================================================
+// GET SECTION EXAM PROGRESS (Derives Batch from Course)
+// ====================================================================
+router.post('/teacher/analytics/section-exam-progress', async (req, res) => {
+    try {
+        // INPUT: Only course_id and section_name required
+        const { course_id, section_name } = req.body;
+
+        if (!course_id || !section_name) {
+            return res.status(400).json({ error: "course_id and section_name are required" });
+        }
+
+        // ---------------------------------------------------------
+        // 1. GET BATCH_ID FROM COURSE (The Fix)
+        // ---------------------------------------------------------
+        const { data: courseData, error: courseError } = await supabase
+            .from('courses')
+            .select('batch_id')
+            .eq('course_id', course_id)
+            .single();
+
+        if (courseError || !courseData) {
+            return res.status(404).json({ error: "Course not found or not linked to a batch." });
+        }
+
+        const batchId = courseData.batch_id;
+
+        // ---------------------------------------------------------
+        // 2. FETCH STUDENTS IN SECTION & BATCH
+        // ---------------------------------------------------------
+        // We filter by 'batch_id' + 'section' to ensure we get the right students
+        const { data: students, error: studentError } = await supabase
+            .from('students')
+            .select('student_id, student_name, uni_reg_id')
+            .eq('section', section_name)
+            .eq('batch_id', batchId);
+
+        if (studentError) throw studentError;
+
+        if (!students || students.length === 0) {
+            return res.json({
+                success: true,
+                data: {
+                    section_name,
+                    message: "No students found in this section for this batch.",
+                    students: []
+                }
+            });
+        }
+
+        const studentIds = students.map(s => s.student_id);
+
+        // ---------------------------------------------------------
+        // 3. BUILD "EXAM BLUEPRINT" FROM FIREBASE
+        // ---------------------------------------------------------
+        let examBlueprint = [];
+
+        try {
+            const courseRef = ref(database, `EduCode/Courses/${course_id}/units`);
+            const snap = await get(courseRef);
+
+            if (snap.exists()) {
+                const unitsData = snap.val();
+
+                Object.keys(unitsData).forEach(unitKey => {
+                    const subUnits = unitsData[unitKey]['sub-units'] || {};
+
+                    Object.keys(subUnits).forEach(subKey => {
+                        const subMeta = subUnits[subKey];
+
+                        // STRICT FILTER: Check if sub_type is 'exam'
+                        if (subMeta['sub_type'] === 'exam') {
+
+                            // Check availability of questions
+                            const hasMCQ = subMeta.mcq !== undefined || (subMeta['total-mcq-questions'] && subMeta['total-mcq-questions'] > 0);
+                            const hasCoding = subMeta.coding !== undefined || (subMeta['total-coding-questions'] && subMeta['total-coding-questions'] > 0);
+
+                            if (hasMCQ || hasCoding) {
+                                examBlueprint.push({
+                                    sub_unit_id: subKey,
+                                    has_mcq: hasMCQ,
+                                    has_coding: hasCoding
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+        } catch (fbErr) {
+            console.error("Firebase Blueprint Error:", fbErr);
+            return res.status(500).json({ error: "Failed to fetch course structure" });
+        }
+
+        const totalExamItems = examBlueprint.length;
+
+        if (totalExamItems === 0) {
+            return res.json({ success: true, data: { section_name, message: "No exams found in this course.", students: [] } });
+        }
+
+        // ---------------------------------------------------------
+        // 4. BULK FETCH EXAM RESULTS
+        // ---------------------------------------------------------
+        const { data: allResults } = await supabase
+            .from('results')
+            .select('student_id, sub_unit_id, result_type, submitted_at, start_config, end_config')
+            .in('student_id', studentIds)
+            .eq('course_id', course_id)
+            .not('submitted_at', 'is', null);
+
+        // Map for fast lookup
+        const resultMap = new Map();
+        (allResults || []).forEach(r => {
+            resultMap.set(`${r.student_id}_${r.sub_unit_id}_${r.result_type}`, r);
+        });
+
+        // ---------------------------------------------------------
+        // 5. CALCULATE PROGRESS & EXTRACT CONFIGS
+        // ---------------------------------------------------------
+        const studentProgressList = students.map(student => {
+            let totalProgressSum = 0;
+            let lastStartConfig = null;
+            let lastEndConfig = null;
+
+            examBlueprint.forEach(examItem => {
+                let itemProgress = 0;
+
+                const mcqKey = `${student.student_id}_${examItem.sub_unit_id}_mcq`;
+                const codingKey = `${student.student_id}_${examItem.sub_unit_id}_coding`;
+
+                const mcqResult = resultMap.get(mcqKey);
+                const codingResult = resultMap.get(codingKey);
+
+                const didMCQ = !!mcqResult;
+                const didCoding = !!codingResult;
+
+                // Extract Configs (Prefer Coding config if available, else MCQ)
+                if (didCoding) {
+                    if (codingResult.start_config) lastStartConfig = codingResult.start_config;
+                    if (codingResult.end_config) lastEndConfig = codingResult.end_config;
+                } else if (didMCQ) {
+                    if (mcqResult.start_config) lastStartConfig = mcqResult.start_config;
+                    if (mcqResult.end_config) lastEndConfig = mcqResult.end_config;
+                }
+
+                // 50/50 Progress Logic
+                if (examItem.has_mcq && examItem.has_coding) {
+                    if (didMCQ) itemProgress += 50;
+                    if (didCoding) itemProgress += 50;
+                }
+                else if (examItem.has_mcq) {
+                    if (didMCQ) itemProgress = 100;
+                }
+                else if (examItem.has_coding) {
+                    if (didCoding) itemProgress = 100;
+                }
+
+                totalProgressSum += itemProgress;
+            });
+
+            // Calculate Overall Average
+            const examAvg = Math.round(totalProgressSum / totalExamItems);
+
+            return {
+                student_name: student.student_name,
+                uni_reg_id: student.uni_reg_id, // Included in response, not needed in input
+                exam_completion_percentage: examAvg,
+                debug_configs: {
+                    start_config: lastStartConfig || {},
+                    end_config: lastEndConfig || {}
+                }
+            };
+        });
+
+        return res.json({
+            success: true,
+            data: {
+                section_name,
+                total_students: students.length,
+                total_exams_in_course: totalExamItems,
+                students: studentProgressList
+            }
+        });
+
+    } catch (e) {
+        console.error("Exam Analytics Error:", e);
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
 });
