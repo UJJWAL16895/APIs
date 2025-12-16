@@ -794,7 +794,10 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
 // ====================================================================
 // GET PRACTICE COURSES BY BATCH ID (Robust Filtering)
 // ====================================================================
-router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
+// ====================================================================
+// GET EXAM COURSES BY BATCH ID (Strict Fix)
+// ====================================================================
+router.post('/admin/get-exam-courses-by-batch', async (req, res) => {
     try {
         const { batch_id } = req.body;
 
@@ -814,38 +817,21 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
         }
 
         const courseIds = batchData.registered_courses_id || [];
-
         if (courseIds.length === 0) {
-            return res.json({
-                success: true,
-                data: {
-                    batch_id,
-                    batch_name: batchData.batch_name,
-                    total_practice_courses: 0,
-                    courses: []
-                }
-            });
+            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, total_exam_courses: 0, courses: [] } });
         }
 
-        // 2. Fetch Course Names from Supabase
+        // 2. Fetch Course Names
         const { data: coursesData } = await supabase
             .from('courses')
             .select('course_id, course_name')
             .in('course_id', courseIds);
 
         if (!coursesData || coursesData.length === 0) {
-            return res.json({
-                success: true,
-                data: {
-                    batch_id,
-                    batch_name: batchData.batch_name,
-                    total_practice_courses: 0,
-                    courses: []
-                }
-            });
+            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, total_exam_courses: 0, courses: [] } });
         }
 
-        // 3. Filter Courses: Check Firebase for "sub_type: practice" (Strict & Clean)
+        // 3. Filter Courses
         const validCourses = [];
 
         await Promise.all(coursesData.map(async (course) => {
@@ -855,30 +841,31 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
 
                 if (snapshot.exists()) {
                     const units = snapshot.val();
-                    let hasPractice = false;
+                    let hasExam = false;
 
                     // Iterate Units
                     for (const unitKey in units) {
                         const subUnits = units[unitKey]['sub-units'];
-
                         if (subUnits) {
                             // Iterate Sub-Units
                             for (const subKey in subUnits) {
                                 const rawType = subUnits[subKey]['sub_type'];
 
-                                // FIX: Normalize string to handle "Practice", "practice ", "PRACTICE"
+                                // STRICT CHECK
                                 if (rawType && typeof rawType === 'string') {
-                                    if (rawType.toLowerCase().trim() === 'practice') {
-                                        hasPractice = true;
-                                        break; // Found practice content, mark course as valid
+                                    const cleanType = rawType.toLowerCase().trim();
+
+                                    if (cleanType === 'exam') {
+                                        hasExam = true;
+                                        break;
                                     }
                                 }
                             }
                         }
-                        if (hasPractice) break; // Stop checking this course if we already found practice
+                        if (hasExam) break;
                     }
 
-                    if (hasPractice) {
+                    if (hasExam) {
                         validCourses.push(course);
                     }
                 }
@@ -892,13 +879,13 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
             data: {
                 batch_id: batch_id,
                 batch_name: batchData.batch_name,
-                total_practice_courses: validCourses.length,
+                total_exam_courses: validCourses.length,
                 courses: validCourses
             }
         });
 
     } catch (e) {
-        console.error("Get Practice Courses Error:", e);
+        console.error("Get Exam Courses Error:", e);
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
 });
