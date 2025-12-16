@@ -789,16 +789,7 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
 
 
 // ====================================================================
-// GET PRACTICE COURSES BY BATCH ID (Filters via Firebase)
-// ====================================================================
-// ====================================================================
-// GET PRACTICE COURSES BY BATCH ID (Robust Filtering)
-// ====================================================================
-// ====================================================================
-// GET EXAM COURSES BY BATCH ID (Strict Fix)
-// ====================================================================
-// ====================================================================
-// GET PRACTICE COURSES BY BATCH ID (Strict Fix)
+// GET PRACTICE COURSES BY BATCH ID (Excludes if ANY Exam exists)
 // ====================================================================
 router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
     try {
@@ -845,6 +836,7 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
                 if (snapshot.exists()) {
                     const units = snapshot.val();
                     let hasPractice = false;
+                    let hasExam = false; // Flag to disqualify the course
 
                     // Iterate Units
                     for (const unitKey in units) {
@@ -853,23 +845,28 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
                             // Iterate Sub-Units
                             for (const subKey in subUnits) {
                                 const rawType = subUnits[subKey]['sub_type'];
-                                
-                                // STRICT CHECK
+
                                 if (rawType && typeof rawType === 'string') {
-                                    // Normalize: Lowercase and Trim
                                     const cleanType = rawType.toLowerCase().trim();
-                                    
+
+                                    // 1. Check for disqualifier immediately
+                                    if (cleanType === 'exam') {
+                                        hasExam = true;
+                                        break; // Found an exam, this course is disqualified
+                                    }
+
+                                    // 2. Check for qualifier
                                     if (cleanType === 'practice') {
                                         hasPractice = true;
-                                        break; 
                                     }
                                 }
                             }
                         }
-                        if (hasPractice) break; 
+                        if (hasExam) break; // Break outer loop if disqualified
                     }
 
-                    if (hasPractice) {
+                    // FINAL LOGIC: Must have practice AND NO exam content
+                    if (hasPractice && !hasExam) {
                         validCourses.push(course);
                     }
                 }
@@ -893,7 +890,6 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
 });
-
 
 
 module.exports = router;
