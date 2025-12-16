@@ -791,6 +791,9 @@ router.post('/admin/get-sections-by-batch', async (req, res) => {
 // ====================================================================
 // GET PRACTICE COURSES BY BATCH ID (Filters via Firebase)
 // ====================================================================
+// ====================================================================
+// GET PRACTICE COURSES BY BATCH ID (Robust Filtering)
+// ====================================================================
 router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
     try {
         const { batch_id } = req.body;
@@ -799,7 +802,7 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
             return res.status(400).json({ error: "batch_id is required" });
         }
 
-        // 1. Fetch Batch Details (Name + Registered Course IDs)
+        // 1. Fetch Batch Details
         const { data: batchData, error: batchError } = await supabase
             .from('batches')
             .select('batch_name, registered_courses_id')
@@ -818,6 +821,7 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
                 data: {
                     batch_id,
                     batch_name: batchData.batch_name,
+                    total_practice_courses: 0,
                     courses: []
                 }
             });
@@ -830,16 +834,22 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
             .in('course_id', courseIds);
 
         if (!coursesData || coursesData.length === 0) {
-            return res.json({ success: true, data: { batch_id, batch_name: batchData.batch_name, courses: [] } });
+            return res.json({
+                success: true,
+                data: {
+                    batch_id,
+                    batch_name: batchData.batch_name,
+                    total_practice_courses: 0,
+                    courses: []
+                }
+            });
         }
 
-        // 3. Filter Courses: Check Firebase for "sub_type: practice"
-        // We use Promise.all to check all courses in parallel for speed
+        // 3. Filter Courses: Check Firebase for "sub_type: practice" (Strict & Clean)
         const validCourses = [];
 
         await Promise.all(coursesData.map(async (course) => {
             try {
-                // Fetch Units for this course
                 const unitsRef = ref(database, `EduCode/Courses/${course.course_id}/units`);
                 const snapshot = await get(unitsRef);
 
@@ -847,19 +857,25 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
                     const units = snapshot.val();
                     let hasPractice = false;
 
-                    // Deep Search: Look for ANY sub-unit with sub_type === 'practice'
-                    // We break loops early (using some/foreach logic) once found to save time
+                    // Iterate Units
                     for (const unitKey in units) {
                         const subUnits = units[unitKey]['sub-units'];
+
                         if (subUnits) {
+                            // Iterate Sub-Units
                             for (const subKey in subUnits) {
-                                if (subUnits[subKey]['sub_type'] == 'practice') {
-                                    hasPractice = true;
-                                    break; // Found one! No need to check rest of this course
+                                const rawType = subUnits[subKey]['sub_type'];
+
+                                // FIX: Normalize string to handle "Practice", "practice ", "PRACTICE"
+                                if (rawType && typeof rawType === 'string') {
+                                    if (rawType.toLowerCase().trim() === 'practice') {
+                                        hasPractice = true;
+                                        break; // Found practice content, mark course as valid
+                                    }
                                 }
                             }
                         }
-                        if (hasPractice) break;
+                        if (hasPractice) break; // Stop checking this course if we already found practice
                     }
 
                     if (hasPractice) {
@@ -877,7 +893,7 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
                 batch_id: batch_id,
                 batch_name: batchData.batch_name,
                 total_practice_courses: validCourses.length,
-                courses: validCourses // Contains only courses with practice content
+                courses: validCourses
             }
         });
 
@@ -885,8 +901,8 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
         console.error("Get Practice Courses Error:", e);
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
-
-
-
 });
+
+
+
 module.exports = router;
