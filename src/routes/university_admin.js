@@ -853,7 +853,7 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
                         const subUnits = units[unitKey]['sub-units'];
                         if (subUnits) {
                             for (const subKey in subUnits) {
-                                if (subUnits[subKey]['sub_type'] === 'practice') {
+                                if (subUnits[subKey]['sub_type'] == 'practice') {
                                     hasPractice = true;
                                     break; // Found one! No need to check rest of this course
                                 }
@@ -885,5 +885,8 @@ router.post('/admin/get-practice-courses-by-batch', async (req, res) => {
         console.error("Get Practice Courses Error:", e);
         res.status(500).json({ error: "SERVER_ERROR", details: e.message });
     }
+
+
+
 });
 module.exports = router;
